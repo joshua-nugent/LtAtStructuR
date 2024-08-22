@@ -2697,13 +2697,18 @@ LtAtData <- R6::R6Class(
                 ## impute baseline values 
                 private$.data[intnum==0 & is.na(get(cov_name)) , eval(cov_name):=imputed_value]
             }
-            ## Implement LOVCF 
-            if(is.null(covariate_data[[cov.i]]$type) || covariate_data[[cov.i]]$type!="indicator"){ # null is only possible for time-indep vars
+            if(!is.null(covariate_data[[cov.i]]$type)){ # null is only possible for time-indep vars
+              ## Implement LOVCF 
+              if(covariate_data[[cov.i]]$type!="indicator"){ 
                 private$.data[, eval(cov_name):= get(cov_name)[1], by = .(get(private$.cohort_data$IDvar), cumsum(!is.na(get(cov_name)))) ]
                 ## private$.data[,eval(cov_name):=zoo::na.locf(get(cov_name)),by=id_var]
-            }else{
+              }else{
                 if(private$.data[ , class(get(cov_name)) ]=="character")private$.data[ is.na(get(cov_name)) , eval(cov_name) := "None" ]
                 else private$.data[ is.na(get(cov_name)) , eval(cov_name) := 0 ]
+              }
+            }else{
+              ## Override missing time-independent values with imputed_value
+              private$.data[get("I."%+%cov_name)==1, eval(cov_name) := imputed_value]
             }
         }
         ## reorder data before exiting
