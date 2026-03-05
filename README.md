@@ -1,4 +1,19 @@
 
+> **Note: This is an experimental fork of
+> [romainkp/LtAtStructuR](https://github.com/romainkp/LtAtStructuR),
+> generated with AI assistance for testing purposes. It contains
+> performance optimizations to `assignAC()` and `assignL()` that have not
+> been reviewed or endorsed by the original authors. Use at your own
+> risk.**
+>
+> Install directly from this fork with:
+>
+> ```r
+> devtools::install_github("joshua-nugent/LtAtStructuR")
+> ```
+
+---
+
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
 # R/`LtAtStructuR`
