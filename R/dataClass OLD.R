@@ -1233,23 +1233,560 @@ LtAtData <- R6::R6Class(
       eof_date <- private$.cohort_data$EOF_date
       eof_type <- private$.cohort_data$EOF_type
       y_name <- private$.cohort_data$Y_name
+        
+      # loop over individuals
+      data_sliced_by_id <-
+        #lapply(
+        future.apply::future_lapply(
+          unique(outcome_data[, get(id_var)]),
+          function(id) {
+            ## message(paste0(
+            ##   "Processing ", id, ": subject ",
+            ##   which(unique(outcome_data[, get(id_var)]) %in% id),
+            ##   " of ", length(unique(outcome_data[, get(id_var)]))
+            ## ))
 
-      # Vectorized implementation (replaces per-subject future_lapply loop)
-      data_assigned_ac <- .assignAC_vectorized(
-        outcome_data, exp_data, cohort_data,
-        id_var, start_date, end_date, exp_level,
-        exp_ref, eof_date, eof_type, y_name,
-        firs_exp_rule, exp_threshold
-      )
+            # reduce data to just one subject
+            out_data_slice <- outcome_data[get(id_var) == id, ]
+            data.table::setkeyv(out_data_slice, id_var)
 
-      # Sort and set column order
-      if (exp_data[, length(unique(get(exp_level)))] > 1) {
+            # join data.tables based on date columns and reduce
+            exp_data_this_id <- exp_data[get(id_var) == id, ]
+            data.table::setkeyv(exp_data_this_id, id_var)
+
+            # subset cohort data by ID and key by ID for later merging
+            cohort_data_this_id <- cohort_data[get(id_var) == id, ]
+            data.table::setkeyv(cohort_data_this_id, id_var)
+
+            # merge out_data_slice and cohort data by ID
+            out_data_slice <- merge(out_data_slice, cohort_data_this_id,
+              by.x = id_var, by.y = id_var
+            )
+
+            # unit of time
+            unit_time <- out_data_slice[, unique(intend - intstart + 1)]
+
+            if (nrow(exp_data_this_id) > 0) {
+              # find exposure dates and lengths
+              exp_overlap <- merge(out_data_slice,
+                exp_data_this_id,
+                allow.cartesian = TRUE
+              )
+              # define new exposure time for use in 12a/13a (based on Z-days)
+              z_bin_int <- exp_overlap[, lubridate::interval(
+                get(eof_date) -
+                  unit_time + 1,
+                get(eof_date)
+              )]
+              z_exp_int <- exp_overlap[, lubridate::interval(
+                get(start_date),
+                get(end_date)
+              )]
+              z_overlap <- lubridate::int_overlaps(z_bin_int, z_exp_int)
+              z_exp_overlap <- copy(exp_overlap)
+              z_exp_overlap[z_overlap == FALSE, z_exp_time := 0]
+              z_exp_overlap[
+                z_overlap == TRUE,
+                z_exp_time := (pmin(get(eof_date), get(end_date)) -
+                  pmax(
+                    get(eof_date) - unit_time + 1,
+                    get(start_date)
+                  ) + 1)
+              ]
+              
+              z_exp_overlap[, z_exp_time_by_unique_exp := .(sum(z_exp_time)), by = .(get(exp_level),intnum)] ### Obtains respective exposure times by intnum and exposure level
+              z_exp_overlap[z_overlap == FALSE, z_exp_time_by_unique_exp := 0]  ###  0s out all rows except rows in which patients outcome overlaps with exposure(s)
+              z_exp_overlap[, z_exp_time_by_freq_exp := max(z_exp_time_by_unique_exp), by = intnum] ### Obtains most frequent exposure time; will aid in determining a tie amongst exposures
+              z_exp_overlap[, z_exp_time := sum(z_exp_time), by = intnum]
+              assertthat::assert_that(assertthat::are_equal(z_exp_overlap,z_exp_overlap[order(intnum,get(start_date)),]),
+                                      msg = "rows in z_exp_overlap are not ranked by startA")
+              z_exp_overlap[, z_tie := ifelse(length(unique(get(exp_level)[z_exp_time_by_unique_exp%in%z_exp_time_by_freq_exp]))>1,1,0), by = intnum] ### Initiating z_tie column; if the length of the exposure vector in which z_exp_time_by_unique_exp (i.e. exposure time by unique exposure) is equal to z_exp_time_by_freq_exp (i.e. exposure time by the most frequent exposure) is greater than 1, then there exists a tie amongst those exposure levels and no tie otherwise
+              z_exp_overlap[z_tie == 0, z_max_freq_exp := unique(get(exp_level)[z_exp_time_by_unique_exp%in%z_exp_time_by_freq_exp]), by = intnum] ### If there is no tie at interval t, returns most frequent exposure level in interval t as described by algorithm (i.e. most frequent exposure)
+              z_exp_overlap[z_tie == 1, z_max_freq_exp := tail(get(exp_level)[z_exp_time_by_unique_exp%in%z_exp_time_by_freq_exp],1) ,by = intnum] ### Obtains level involved in the tie that the patient experienced last during the interval t
+              #### ATTENTION: z_exposure_times will later be used for case 12a's in which z_tie==1
+              z_exposure_times <- copy(z_exp_overlap) 
+              z_exposure_times <- z_exposure_times[z_exp_time_by_unique_exp%in%z_exp_time_by_freq_exp,]
+              z_exposure_times <- z_exposure_times[intnum==intnum[.N],]
+              z_exp_overlap <- unique(z_exp_overlap[, mget(c(
+                id_var, "intnum",
+                "z_exp_time",
+                "z_exp_time_by_freq_exp",
+                "z_tie",
+                "z_max_freq_exp"
+              ))])
+              # define exposure time for all other cases
+              bin_int <- exp_overlap[, lubridate::interval(
+                intstart,
+                pmin(
+                  intend,
+                  get(eof_date)
+                )
+              )]
+              exp_int <- exp_overlap[, lubridate::interval(
+                get(start_date),
+                get(end_date)
+              )]
+              exp_overlap[, overlap := lubridate::int_overlaps(
+                bin_int,
+                exp_int
+              )]
+              exp_overlap <- exp_overlap[overlap == TRUE, ]
+              exp_overlap[, exp_intervals := (pmin(intend, get(end_date)) -
+                pmax(
+                  intstart,
+                  get(start_date)
+                ) + 1)]
+
+              exp_overlap[, exp_time := sum(exp_intervals), by = intnum]
+              exp_overlap[, exp_time_by_unique_exp := .(sum(exp_intervals)), by = .(get(exp_level),intnum)] ### Obtains respective exposure times by intnum and exposure level
+              exp_overlap[, exp_time_by_freq_exp := max(exp_time_by_unique_exp), by = intnum] ### Obtains most frequent exposure time; will aid in determining a tie amongst exposures
+              assertthat::assert_that(assertthat::are_equal(exp_overlap,exp_overlap[order(intnum,get(start_date)),]),
+                                      msg = "rows in exp_overlap are not ranked by startA")
+              exp_overlap[, tie := ifelse(length(unique(get(exp_level)[exp_time_by_unique_exp%in%exp_time_by_freq_exp]))>1,1,0), by = intnum] ### Initiating tie column; if the length of the exposure vector in which exp_time_by_unique_exp (i.e. exposure time by unique exposure) is equal to exp_time_by_freq_exp (i.e. exposure time by the most frequent exposure) is greater than 1, then there exists a tie amongst those exposure levels and no tie otherwise
+              exp_overlap[tie == 0, max_freq_exp := unique(get(exp_level)[exp_time_by_unique_exp%in%exp_time_by_freq_exp]), by = intnum] ### If there is no tie at interval t, returns most frequent exposure level in interval t as described by the algorithm (i.e. most frequent exposure)
+              exp_overlap[tie == 1, max_freq_exp := tail(get(exp_level)[exp_time_by_unique_exp%in%exp_time_by_freq_exp],1), by = intnum] ### Obtains level involved in the tie that the patient experienced last during the interval t
+              exp_overlap[, eval(start_date) := NULL]
+              exp_overlap[, eval(end_date) := NULL]
+              exp_overlap[, exp_intervals := NULL]
+              exp_overlap <- unique(exp_overlap)
+              data.table::setkey(exp_overlap, NULL)
+              data.table::setkey(out_data_slice, NULL)
+              
+              exp_overlap[, final := ifelse(exp_time_by_unique_exp == exp_time_by_freq_exp, TRUE, FALSE)] ### Keeping rows that with most frequent exposure and/or tied exposures, by intnum 
+              exp_overlap[intnum==0, final := ifelse(max_freq_exp == get(exp_level), TRUE, FALSE)] ### If there exists a tie at t==0, keeping row with max frequent exposure
+              exp_overlap <- exp_overlap[(final),] 
+              exp_overlap[, final := NULL]
+              exp_overlap[, A0.warn := 0] ### Initiazting A0.warn
+              
+              # merging exposure/overlap and baseline data sequentially
+              overlap_data <- merge(out_data_slice, exp_overlap, all.x = TRUE)
+              overlap_data <- merge(overlap_data, z_exp_overlap,
+                by = c(id_var, "intnum"), all.x = TRUE
+              )
+            } else {
+              # NOTE: when unexposed, special handling of lack of exp_data
+              overlap_data <- data.table::copy(out_data_slice)
+              overlap_data[, eval(exp_level) := NA]
+              overlap_data[, overLap := NA]
+              overlap_data[, exp_time := difftime(NA, NA, units = "days")]
+              overlap_data[, z_exp_time := difftime(NA, NA, units = "days")]
+              overlap_data[, z_exp_time_by_freq_exp := difftime(NA, NA, units = "days")]
+              overlap_data[, exp_time_by_unique_exp := difftime(NA, NA, units = "days")]
+              overlap_data[, exp_time_by_freq_exp := difftime(NA, NA, units = "days")]
+              overlap_data[, tie := 0]
+              overlap_data[, A0.warn := 0]
+            }
+            overlap_data[
+              is.na(exp_time),
+              exp_time := as.difftime(0, units = "days")
+            ]
+            overlap_data[
+              is.na(z_exp_time),
+              z_exp_time := as.difftime(0, units = "days")
+            ]
+            overlap_data[
+              is.na(exp_time_by_unique_exp),
+              exp_time_by_unique_exp := as.difftime(0, units = "days")
+              ]
+            overlap_data[
+              is.na(tie),
+              tie := 0
+              ]
+            overlap_data[
+              is.na(A0.warn),
+              A0.warn := 0
+              ]
+            overlap_data[
+              is.na(exp_time_by_freq_exp),
+              exp_time_by_freq_exp := as.difftime(0, units = "days")
+              ]
+            overlap_data[
+              is.na(z_exp_time_by_freq_exp),
+              z_exp_time_by_freq_exp := as.difftime(0, units = "days")
+              ]
+            data.table::setkeyv(overlap_data, id_var)
+
+            # initializing exposure and case columns that will be edited below
+            overlap_data[, exposure := rep(0, .N)]
+            overlap_data[, censor := rep(0, .N)]
+            overlap_data[, case := "tmp"]
+
+            # find censoring event by examining cohort data
+            overlap_data[, obs_interval :=
+              lubridate::interval(
+                lubridate::ymd(intstart),
+                lubridate::ymd(intend)
+              )]
+            overlap_data[
+              get(eof_type) != y_name,
+              censor := as.numeric(lubridate::ymd(get(eof_date))
+              %within% obs_interval)
+            ]
+            overlap_data[, obs_interval := NULL]
+
+            # LOGIC 1 ONLY
+            if (firs_exp_rule == 1) {
+              # case 1a: create exposure indicator and add to patient-level data
+              #overlap_data[exp_time > 0, exposure := 1] OLD
+              overlap_data[exp_time_by_freq_exp > 0, exposure := 1]
+              if (overlap_data[, sum(exposure)] > 0) {
+                #overlap_data[min(which(exposure == 1)), case := "1a"] OLD
+                ## ATTENTION: Assigns case 1a to all rows that need be assigned (i.e. there may exist multiple rows for any time point t due to carrying tied exposure levels by intnum)
+                overlap_data[
+                  intnum==overlap_data[min(which(exposure == 1)),intnum],
+                  case := "1a"]
+              }
+              overlap_data[, Part1 := !cumsum(shift(exposure,
+                n = 1L, fill = 0,
+                type = "lag"
+              )) > 0]
+
+              overlap_data[case=="1a",Part1:=TRUE] ### Sets Part1=TRUE for all case 1as
+              
+              # case 2a: no exposure in interval t and not the last interval
+              overlap_data[Part1 == TRUE & exposure != 1, case := "2a"]
+
+              # case 3a: failure in interval t and no exposure before failure
+              # NOTE: by definition, the failure event should be the last event
+              #       SO if this subset exists then case 3a should be assigned
+              #       since it means that exposure has occurred before failure
+              if (overlap_data[Part1 == TRUE, sum(outcome) > 0]) {
+                overlap_data[which(outcome == 1) - 1, `:=`(
+                  exposure = 0,
+                  censor = 0,
+                  outcome = 0,
+                  case = "3a"
+                )]
+                overlap_data[(outcome == 1), `:=`(
+                  exposure = NA,
+                  censor = NA,
+                  case = "3a"
+                )]
+              }
+
+              # case 4a: right-censoring in interval t, no exposure prior
+              if (overlap_data[Part1 == TRUE & exposure == 0, 1 %in% censor]) {
+                overlap_data[as.logical(censor), `:=`(
+                  outcome = 0, exposure = 0,
+                  case = "4a"
+                )]
+              }
+
+              # case 5a: right-censoring in interval, exposure before censoring
+              # NOTE: censoring time should be max time if administrative end
+              if (overlap_data[Part1 == TRUE & exposure == 1, 1 %in% censor]) {
+                #overlap_data[.N, `:=`(outcome = 0, exposure = 1, case = "5a")] OLD
+                ### ATTENTION: Assigns case 5a to all rows that need be assigned (i.e. there may exist multiple rows for any time point t due to carrying tied exposure levels by intnum)
+                overlap_data[censor==1, `:=`(outcome = 0, exposure = 1, case = "5a")] 
+              }
+
+              # case 6a: failure in interval and exposure before failure event
+              overlap_data[, lagPart1 := shift(Part1,
+                n = 1L, fill = TRUE,
+                type = "lag"
+              )]
+              if (overlap_data[Part1 == TRUE, 1 %in% exposure] &
+                overlap_data[lagPart1 == TRUE, 1 %in% outcome]) {
+                intnum.before.outcome <- overlap_data[which(outcome == 1),intnum-1]
+                overlap_data[intnum%in%intnum.before.outcome, `:=`( #which(outcome == 1) - 1
+                  exposure = 1,
+                  censor = 0,
+                  outcome = 0,
+                  case = "6a"
+                )]
+                overlap_data[(outcome == 1), `:=`(
+                  exposure = NA,
+                  censor = NA,
+                  case = "6a"
+                )]
+              }
+              overlap_data[outcome == 1 & lagPart1 == TRUE, Part1 := TRUE]
+            }
+
+            # set Part1 flag to FALSE if in LOGIC 2
+            if (firs_exp_rule == 0) {
+              overlap_data[, Part1 := FALSE]
+            }
+
+            # NOTE: PART 2: the following only occur AFTER first exposure t
+            # case 8a/1b: t is NOT the last interval and avg exposure during t
+            #             is \geq X%, then define j = 1 and A(t) = j
+            ### ATTENTION: Line below was modified from "exp_time" to "exp_time_by_freq_exp" to account for proper exposure time by exposure level for categorical outcome; still holds true for binary outcome
+            overlap_data[, exp_beyond_threshold := as.numeric(exp_time_by_freq_exp) /
+              as.numeric(pmin(intend, get(eof_date)) - intstart + 1) >=
+              exp_threshold]
+            ### ATTENTION: If the sum of the proportions of days exposed to any possible level is greater than or equal to exp_threshold AND 
+            ###            if the proportion of days exposed during interval t to level j < exp_threshold then a warning indicator is set to 1.
+            overlap_data[, Awarn_exp_beyond_threshold := as.numeric(exp_time) /
+                           as.numeric(pmin(intend, get(eof_date)) - intstart + 1) >=
+                           exp_threshold]
+            overlap_data[
+              #overlap_data[, .I < .N]  & OLD
+              ### ATTENTION: TRUE for intnum in which overlap_data[, .I < .N] (i.e. there may exist multiple rows for any time point t due to carrying tied exposure levels by intnum)
+              overlap_data[,intnum < overlap_data[overlap_data[, !.I < .N],intnum]] &
+                exp_beyond_threshold & !Part1,
+              `:=`(
+                exposure = 1,
+                outcome = 0,
+                censor = 0,
+                case = ifelse(firs_exp_rule == 0, "1b", "8a")
+              )
+            ]
+
+            # case 9a/2b: t is NOT the last interval and avg exposure during t
+            #             is less than X%, then define j = 0 and A(t) = j
+            overlap_data[
+              #overlap_data[, .I < .N] == TRUE & OLD
+              ### ATTENTION: TRUE for intnum in which overlap_data[, .I < .N] (i.e. there may exist multiple rows for any time point t due to carrying tied exposure levels by intnum)
+              overlap_data[,intnum < overlap_data[overlap_data[, !.I < .N],intnum]] &
+              exp_beyond_threshold == FALSE & !Part1, `:=`(
+              exposure = 0,
+              outcome = 0,
+              censor = 0,
+              tie = 0,
+              A0.warn = ifelse(Awarn_exp_beyond_threshold, 1, 0),
+              case = ifelse(firs_exp_rule == 0, "2b", "9a")
+            )]
+
+            # LOGIC 1: cases 10a/11a: t is last interval and a right-censoring
+            #                         event occurs during the interval t...
+            # LOGIC 2: cases 3b/4b: t is last interval and a right-censoring
+            #                       event occurs during the interval t...
+            if (overlap_data[.N, 1 %in% censor & Part1 == FALSE]) {
+              # case 10a/3b: ...then if avg exposure up to + including time C is
+              #              greater than or equal to X%, let j = 1, A(t) = j
+              overlap_data[
+                #overlap_data[, .I == .N] & OLD
+                ### ATTENTION: TRUE for intnum in which overlap_data[, .I == .N] (i.e. there may exist multiple rows for any time point t due to carrying tied exposure levels by intnum)
+                  overlap_data[overlap_data[, .I == .N],intnum] == intnum &
+                  exp_beyond_threshold == TRUE,
+                `:=`(
+                  censor = 1, outcome = 0,
+                  exposure = 1,
+                  case = ifelse(firs_exp_rule == 0, "3b", "10a")
+                )
+              ]
+              ## }
+              # case 11a/4b: ...then if avg exposure up to + including time C is
+              #              less than X%, let j = 0 and A(t) = j
+              overlap_data[
+                #overlap_data[, .I == .N] & OLD
+                ### ATTENTION: TRUE for intnum in which overlap_data[, .I == .N] (i.e. there may exist multiple rows for any time point t due to carrying tied exposure levels by intnum)
+                  overlap_data[overlap_data[, .I == .N],intnum] == intnum &
+                  exp_beyond_threshold == FALSE,
+                `:=`(
+                  censor = 1, outcome = 0,
+                  exposure = 0,
+                  tie = 0,
+                  A0.warn = ifelse(Awarn_exp_beyond_threshold, 1, 0),
+                  case = ifelse(firs_exp_rule == 0, "4b", "11a")
+                )
+              ]
+            }
+
+            # LOGIC 1: cases 12a/13a: t is last interval and the failure event
+            #                         occurs during the interval t, then let Z
+            #                         be number of days in each interval and
+            #                         compute the average exposure (weighted
+            #                         mean) during Z days up to and including
+            #                         the day when the failure event occurs
+            # LOGIC 2: cases 5b/6b: t is last interval and the failure event
+            #                       occurs during the interval t, then let Z
+            #                       be number of days in each interval and
+            #                       compute the average exposure (weighted
+            #                       mean) during Z days up to and including
+            #                       the day when the failure event occurs
+            if (overlap_data[.N, outcome == 1 & Part1 == FALSE]) {
+              # NOTE: greater than 2 rows corresponds to the case where the
+              #       event does not occur in the first interval. As per the
+              #       case def'n, the case where the event occurs in the first
+              #       observed interval must be handled differently.
+              if (nrow(overlap_data) > 2) {
+                # re-define exposure time based on Z-days interval
+                overlap_data[, z_exp_beyond_threshold :=
+                  as.numeric(z_exp_time_by_freq_exp) / unit_time >= exp_threshold]
+                overlap_data[.N, z_exp_beyond_threshold :=
+                  overlap_data[.N - 1, z_exp_beyond_threshold]]
+                overlap_data[, Awarn_z_exp_beyond_threshold :=
+                  as.numeric(z_exp_time) / unit_time >= exp_threshold]
+              } else {
+                # in this setting, use eof_date - intstart as reference
+                ref_time <- as.numeric(overlap_data[1, get(eof_date) -
+                  intstart + 1])
+                # re-define exposure time based on Z-days interval
+                overlap_data[, z_exp_beyond_threshold :=
+                  as.numeric(z_exp_time_by_freq_exp) / ref_time >= exp_threshold]
+                overlap_data[.N, z_exp_beyond_threshold :=
+                  overlap_data[.N - 1, z_exp_beyond_threshold]]
+                overlap_data[, Awarn_z_exp_beyond_threshold :=
+                  as.numeric(exp_time) / ref_time >= exp_threshold]
+              }
+
+              # case 12a/5b: ...then if average exposure up to and including
+              #                 occurrence of the event is greater than or equal
+              #                 to X%, let j=1 and A(t)=j
+              overlap_data[
+                #overlap_data[, .I == (.N - 1)] == TRUE & OLD
+                ### ATTENTION: TRUE for intnum in which overlap_data[, .I == (.N - 1)] (i.e. there may exist multiple rows for any time point t due to carrying tied exposure levels by intnum)
+                overlap_data[overlap_data[, .I == (.N - 1)],intnum] == intnum &
+                  z_exp_beyond_threshold == TRUE,
+                `:=`(
+                  censor = 0, outcome = 0,
+                  exposure = 1,
+                  tie = unique(z_tie),
+                  A0.warn = 0,
+                  case = ifelse(firs_exp_rule == 0, "5b", "12a")
+                )
+              ]
+              overlap_data[
+                overlap_data[, .I == .N] == TRUE &
+                  z_exp_beyond_threshold == TRUE,
+                `:=`(
+                  censor = NA, outcome = 1,
+                  exposure = NA,
+                  case = ifelse(firs_exp_rule == 0, "5b", "12a")
+                )
+              ]
+              # case 13a/6b: ...then if average exposure up to and including
+              #                 occurrence of event is less than X%, let j = 1
+              #                 and A(t)=j
+              overlap_data[
+                #overlap_data[, .I == (.N - 1)] == TRUE & OLD
+                ### ATTENTION: TRUE for intnum in which overlap_data[, .I == (.N - 1)] (i.e. there may exist multiple rows for any time point t due to carrying tied exposure levels by intnum)
+                overlap_data[overlap_data[, .I == (.N - 1)],intnum] == intnum &
+                  z_exp_beyond_threshold == FALSE,
+                `:=`(
+                  censor = 0, outcome = 0,
+                  exposure = 0,
+                  tie = 0,
+                  A0.warn = ifelse(Awarn_z_exp_beyond_threshold,1,0),
+                  case = ifelse(firs_exp_rule == 0, "6b", "13a")
+                )
+              ]
+              overlap_data[
+                overlap_data[, .I == .N] == TRUE &
+                  z_exp_beyond_threshold == FALSE,
+                `:=`(
+                  censor = NA, outcome = 1,
+                  exposure = NA,
+                  tie = 0,
+                  case = ifelse(firs_exp_rule == 0, "6b", "13a")
+                )
+              ]
+            }
+
+            #####################################
+            ######## Non-binary exposure ########
+            #####################################
+            if(length(unique(exp_data[,get(exp_level)])) > 1){
+              ### Creating exposureTMP to hold temporary exposure levels, will later overwrite exposure column with exposureTMP.
+              overlap_data[exposure%in%0, exposureTMP := exp_ref]
+              overlap_data[exposure%in%1, exposureTMP := get(exp_level)]
+              overlap_data[outcome == 1, exposureTMP := "",]
+              overlap_data[, eval(exp_level) := as.character(get(exp_level))]
+              
+              ##### Logic 1 #####
+              if(firs_exp_rule == 1){
+                overlap_data[tie==1 & case%in%c("1a","5a","6a"), exposureTMP := max_freq_exp ] ### Properly assigning exposures for instances in which tie==1 and case={1a,5a,6a} (m. max_freq_exp holds the exposure level involved in the tie that the patient experienced last during the interval t)
+                overlap_data[exposure==1 & case=="12a" & tie!=1, exposureTMP := unique(z_exposure_times[,get(exp_level)])] ### Assigns most frequent exposure for case 12a w/no tie
+                
+                overlap_data[,TIE_8A:=ifelse(case=="8a" & tie==1,TRUE,FALSE)]
+                if(any(overlap_data[, TIE_8A])){
+                  for(tie.index in overlap_data[TIE_8A==1, unique(intnum)]){
+                    TIE_8A_test <- any(overlap_data[intnum%in%tie.index, exposureTMP]%in%overlap_data[intnum%in%(tie.index-1), exposureTMP]) ## testing if tied exposures are in previous bin (i.e. A(t-1))
+                    At.minus1 <- unique(overlap_data[intnum%in%(tie.index-1), exposureTMP])
+                    overlap_data[intnum%in%tie.index, exposureTMP := ifelse(TIE_8A_test, At.minus1, unique(max_freq_exp))] # Level 'k' is defined as A(t-1) if A(t-1) was set to one of the levels involved in the tie at time t and otherwise 'k' is set to the level involved in the tie that the patient experienced last during the interval t.
+                  }
+                }
+                
+                overlap_data[,TIE_10A:=ifelse(case=="10a" & tie==1,TRUE,FALSE)]
+                if(any(overlap_data[, TIE_10A])){
+                  overlap_data[,TIE_10A_LEAD := shift(TIE_10A, n = 1L, fill = NA, type = "lead")]
+                  TIE_10A_test <- any(overlap_data[(TIE_10A), exposureTMP]%in%overlap_data[intnum%in%overlap_data[!TIE_10A & TIE_10A_LEAD, intnum], exposureTMP]) ## testing if tied exposures are in previous bin (i.e. A(t-1))
+                  At.minus1 <- overlap_data[TIE_10A_LEAD & !TIE_10A, exposureTMP]
+                  overlap_data[TIE_10A == TRUE, exposureTMP := ifelse(TIE_10A_test, At.minus1, unique(max_freq_exp))] # Level 'k' is defined as A(t-1) if A(t-1) was set to one of the levels involved in the tie at time t and otherwise 'k' is set to the level involved in the tie that the patient experienced last during the interval t.
+                }
+
+                overlap_data[,TIE_12A := ifelse(case=="12a" & tie==1,TRUE,FALSE)]
+                if(any(overlap_data[,TIE_12A])){
+                  overlap_data[,TIE_12A_LEAD := shift(TIE_12A, n = 1L, fill = NA, type = "lead")]
+                  TIE_12A_test <- any(z_exposure_times[, get(exp_level)]%in%overlap_data[intnum%in%overlap_data[!TIE_12A & TIE_12A_LEAD, intnum], exposureTMP]) ### testing if tied exposures are in previous bin (i.e. A(t-1))
+                  At.minus1 <- overlap_data[TIE_12A_LEAD == TRUE, exposureTMP]
+                  overlap_data[TIE_12A == TRUE, exposureTMP := ifelse(TIE_12A_test, At.minus1, unique(z_max_freq_exp))] ### Level 'k' is defined as A(t-1) if A(t-1) was set to one of the levels involved in the tie at time t and otherwise 'k' is set to the level involved in the tie that the patient experienced last during the interval t.
+                }
+              
+              ##### Logic 2 #####  
+              } else if(firs_exp_rule == 0){
+                overlap_data[exposure==1 & case=="5b" & tie!=1, exposureTMP:=ifelse((z_exp_time_by_freq_exp/z_exp_time)>=exp_threshold,z_max_freq_exp,exposureTMP)] ### Assigns most frequent exposure for case 5b w/no tie
+                overlap_data[is.na(get(exp_level)) & is.na(exposureTMP) & case=="5b" & tie!=1, exposureTMP:=z_max_freq_exp]  ### Assigns proper exposure level to patients who overlap==FALSE Z-days up to and including the day the failure event occurs
+                
+                overlap_data[,TIE_1B:=ifelse(case=="1b" & tie==1,TRUE,FALSE)]
+                if(any(overlap_data[, TIE_1B])){
+                  for(tie.index in overlap_data[TIE_1B==1, unique(intnum)]){
+                    TIE_1B_test <- any(overlap_data[intnum%in%tie.index, exposureTMP]%in%overlap_data[intnum%in%(tie.index-1), exposureTMP]) ### testing if tied exposures are in previous bin (i.e. A(t-1))
+                    At.minus1 <- unique(overlap_data[intnum%in%(tie.index-1), exposureTMP])
+                    overlap_data[intnum%in%tie.index, exposureTMP := ifelse(TIE_1B_test, At.minus1, unique(max_freq_exp))] ### Level 'k' is defined as A(t-1) if A(t-1) was set to one of the levels involved in the tie at time t and otherwise 'k' is set to the level involved in the tie that the patient experienced last during the interval t.
+                  }
+                }
+                
+                overlap_data[,TIE_3B:=ifelse(case=="3b" & tie==1,TRUE,FALSE)]
+                if(any(overlap_data[, TIE_3B])){
+                  overlap_data[,TIE_3B_LEAD := shift(TIE_3B, n = 1L, fill = NA, type = "lead")]
+                  TIE_3B_test <- any(overlap_data[(TIE_3B), exposureTMP]%in%overlap_data[intnum%in%overlap_data[!TIE_3B & TIE_3B_LEAD, intnum], exposureTMP]) ### testing if tied exposures are in previous bin (i.e. A(t-1))
+                  At.minus1 <- overlap_data[TIE_3B_LEAD & !TIE_3B, exposureTMP]
+                  overlap_data[TIE_3B == TRUE, exposureTMP := ifelse(TIE_3B_test, At.minus1, unique(max_freq_exp))] ### Level 'k' is defined as A(t-1) if A(t-1) was set to one of the levels involved in the tie at time t and otherwise 'k' is set to the level involved in the tie that the patient experienced last during the interval t.
+                }
+                
+                overlap_data[,TIE_5B := ifelse(case=="5b" & tie==1,TRUE,FALSE)]
+                if(any(overlap_data[,TIE_5B])){
+                  overlap_data[,TIE_5B_LEAD := shift(TIE_5B, n = 1L, fill = NA, type = "lead")]
+                  TIE_5B_test <- any(z_exposure_times[,get(exp_level)]%in%overlap_data[intnum%in%overlap_data[!TIE_5B & TIE_5B_LEAD,intnum], exposureTMP]) ### testing if tied exposures are in previous bin (i.e. A(t-1))
+                  At.minus1 <- overlap_data[TIE_5B_LEAD == TRUE, exposureTMP]
+                  overlap_data[TIE_5B == TRUE, exposureTMP := ifelse(TIE_5B_test, At.minus1, unique(z_max_freq_exp))] ### Level 'k' is defined as A(t-1) if A(t-1) was set to one of the levels involved in the tie at time t and otherwise 'k' is set to the level involved in the tie that the patient experienced last during the interval t.
+                }
+              }
+              
+              overlap_data[, exposure := NULL]
+              overlap_data[, exposure := exposureTMP]
+              overlap_data[, final := TRUE]
+              overlap_data[duplicated(intnum), final:= FALSE]
+              overlap_data <- overlap_data[(final),]
+              # final output for current case
+              return(overlap_data[, c(
+                id_var, "intnum", "intstart",
+                "intend", "exposure", "outcome",
+                "censor", "case", eof_type, "tie", "A0.warn"
+              ),
+              with = FALSE
+              ])
+            }
+            
+            #######################################
+            ########### Binary exposure ###########
+            #######################################
+            else {
+              # final output for current case
+              return(overlap_data[, c(
+                id_var, "intnum", "intstart",
+                "intend", "exposure", "outcome",
+                "censor", "case", eof_type
+              ),
+              with = FALSE
+              ])
+            }
+          }
+        ) # end of future_lapply
+        
+      # combined list of data.tables together and sort by ID
+      data_assigned_ac <- data.table::rbindlist(data_sliced_by_id)
+      if(exp_data[,length(unique(get(exp_level)))] > 1){
         data.table::setcolorder(data_assigned_ac, c(
           id_var, "intnum", "intstart", "intend",
           "exposure", "outcome", "censor",
           "case", eof_type, "tie", "A0.warn"
         ))
-      } else {
+      }
+      else {
         data.table::setcolorder(data_assigned_ac, c(
           id_var, "intnum", "intstart", "intend",
           "exposure", "outcome", "censor",
@@ -1258,6 +1795,87 @@ LtAtData <- R6::R6Class(
       }
       data.table::setorderv(data_assigned_ac, id_var)[]
 
+      ## # comparison with gold standard / model output data set for LOGIC 1
+      ## if (firs_exp_rule == 1) {
+      ##   model_output <- expDT_15_f1_p75[, c(
+      ##     "ID", "intnum", "intstart", "intend",
+      ##     "exposure", "outcome", "censor",
+      ##     "case", "EOFtype",
+      ##     "daysexposed1", "intervalpercent1", "lastintpercent1"
+      ##   ), with = FALSE]
+      ##   gs_diff <- sum(model_output$case != data_assigned_ac$case) /
+      ##     length(data_assigned_ac$case) * 100
+      ##   message(paste0(
+      ##     "Detected difference from gold standard: ", gs_diff,
+      ##     "%."
+      ##   ))
+      ## }
+
+      ## # comparison with gold standard / model output data set for LOGIC 2
+      ## if (firs_exp_rule == 0) {
+      ##   model_output <- expDT_15_f0_p75[, c(
+      ##     "ID", "intnum", "intstart",
+      ##     "intend", "exposure", "outcome",
+      ##     "censor", "case", "EOFtype"
+      ##   )]
+      ##   gs_diff <- sum(model_output$case != data_assigned_ac$case) /
+      ##     length(data_assigned_ac$case) * 100
+      ##   message(paste0(
+      ##     "Detected difference from gold standard: ", gs_diff,
+      ##     "%."
+      ##   ))
+      ## }
+
+      #data.table::setcolorder(data_assigned_ac, c(
+      #  id_var, "intnum", "intstart", "intend",
+      #  "exposure", "outcome", "censor",
+      #  "case", eof_type, "tie", "A0.warn"
+      #))
+      ## data.table::setorderv(data_assigned_ac, id_var)[]
+
+      ## Noel: we need your output to match this (including the new column  tie and A0.warn not created by Nima):
+      #model_output <- expDT4_30_f1_p25[, c("ID", "intnum", "intstart", "intend","exposure", "outcome", "censor","case", "EOFtype","tie","A0.warn"), with = FALSE]
+      ## Noel: this measures the discrepancy between your output and the GS output:
+      #print(sum(model_output$case != data_assigned_ac$case) /length(data_assigned_ac$case) * 100)
+      #print(sum(model_output$tie != data_assigned_ac$tie) /length(data_assigned_ac$tie) * 100)
+      #print(sum(model_output$A0.warn != data_assigned_ac$A0.warn) /length(data_assigned_ac$A0.warn) * 100)
+      #print(sum(model_output$exposure != data_assigned_ac$exposure) /length(data_assigned_ac$exposure) * 100)
+      ## Noel: this is a problematic id - you can define it and then got back to the begining of the lapply above to understand where the discrepancy with the GS output comes from:
+      #(id <- model_output$ID[model_output$case != data_assigned_ac$case][1])
+      #(id <- model_output$ID[model_output$tie != data_assigned_ac$tie][1])
+      #(id <- model_output$ID[model_output$A0.warn != data_assigned_ac$A0.warn][1])
+      #(id <- model_output$ID[model_output$exposure != data_assigned_ac$exposure][1])
+      ## # comparison with gold standard / model output data set for LOGIC 1
+      ## if (firs_exp_rule == 1) {
+      ##   model_output <- expDT_15_f1_p75[, c(
+      ##     "ID", "intnum", "intstart", "intend",
+      ##     "exposure", "outcome", "censor",
+      ##     "case", "EOFtype",
+      ##     "daysexposed1", "intervalpercent1", "lastintpercent1"
+      ##   ), with = FALSE]
+      ##   gs_diff <- sum(model_output$case != data_assigned_ac$case) /
+      ##     length(data_assigned_ac$case) * 100
+      ##   message(paste0(
+      ##     "Detected difference from gold standard: ", gs_diff,
+      ##     "%."
+      ##   ))
+      ## }
+
+      ## # comparison with gold standard / model output data set for LOGIC 2
+      ## if (firs_exp_rule == 0) {
+      ##   model_output <- expDT_15_f0_p75[, c(
+      ##     "ID", "intnum", "intstart",
+      ##     "intend", "exposure", "outcome",
+      ##     "censor", "case", "EOFtype"
+      ##   )]
+      ##   gs_diff <- sum(model_output$case != data_assigned_ac$case) /
+      ##     length(data_assigned_ac$case) * 100
+      ##   message(paste0(
+      ##     "Detected difference from gold standard: ", gs_diff,
+      ##     "%."
+      ##   ))
+      ## }
+        
       # output
       private$.data <- data_assigned_ac
       invisible(self)
@@ -1303,19 +1921,10 @@ LtAtData <- R6::R6Class(
             cov_acute <- private$.cov_data[[cov_position]]$acute_change
             cov_date <- private$.cov_data[[cov_position]]$L_date
 
-            # Vectorized implementation (replaces per-subject future_lapply loop)
-            exp_ref <- private$.exp_data$exp_ref
-            data_assigned_lt_by_id <- .assignL_vectorized(
-              outcome_data, cohort_data, exp_data, cov_data,
-              id_var, index_date_var, eof_date_var, eof_type_var,
-              start_date_var, end_date_var, A_level,
-              cov_name, cov_date, cov_acute,
-              first_exp_rule, exp_ref
-            )
-
-            if (FALSE) { # OLD per-subject loop (see git history for full code)
-            data_assigned_lt_by_id_OLD <-
+            # iterative over subject IDs in parallel to assign L(t)
+            data_assigned_lt_by_id <-
               future.apply::future_lapply(unique(outcome_data[, get(id_var)]),
+                                          #lapply(unique(outcome_data[, get(id_var)]),
                                           function(id) {
                                             ## message(paste("Current ID:", id))
                                             # subset to just the current subject
@@ -2021,10 +2630,8 @@ LtAtData <- R6::R6Class(
                                             
                                             return(combined_data)
                                           })  # END: loop over subjects
-            data_assigned_lt_by_id_OLD <- data.table::rbindlist(data_assigned_lt_by_id_OLD, fill = TRUE)
-            } # END if(FALSE) old code block
-
-            ## merge ID-specific data sets            
+            ## merge ID-specific data sets
+            data_assigned_lt_by_id <- data.table::rbindlist(data_assigned_lt_by_id, fill = TRUE)            
             if(cov_position==1){
               data_assigned_lt <- copy(data_assigned_lt_by_id)
               data.table::setcolorder(data_assigned_lt, c(id_var, "intnum", "intstart", "intend",
