@@ -929,7 +929,7 @@ timeDepCovData <- R6::R6Class(
           }
 
           assert_that(private$.data[get(private$.L_date) < get(otherData$index_date) | get(private$.L_date) > get(otherData$EOF_date), .N] == 0)
-          data.table::setkeyv(private$.data, c(private$.IDvar, private$.start_date))
+          data.table::setkeyv(private$.data, c(private$.IDvar, private$.L_date))
         }
         ## remove columns added from merge
         private$.data[, ":="(c(otherData$index_date, otherData$EOF_date), vector("list", 2))]
