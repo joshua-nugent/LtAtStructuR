@@ -359,7 +359,8 @@
                                                        fill = NA, type = "lead")]
           tie_test <- any(od_sub[TIE_10A == TRUE, exposureTMP] %in%
                           od_sub[!TIE_10A & TIE_10A_LEAD == TRUE, exposureTMP])
-          at_minus1 <- od_sub[od_sub[, .N] - 1, exposureTMP]
+          tie_idx <- which(od_sub$TIE_10A)[1]
+          at_minus1 <- od_sub[tie_idx - 1, exposureTMP]
           result_list[get(id_var) == tid & TIE_10A == TRUE,
                        exposureTMP := ifelse(tie_test, at_minus1,
                                              unique(max_freq_exp))]
@@ -376,7 +377,8 @@
           zt_sub <- z_exposure_times[get(id_var) == tid]
           tie_test <- any(zt_sub[, get(exp_level)] %in%
                           od_sub[!TIE_12A & TIE_12A_LEAD == TRUE, exposureTMP])
-          at_minus1 <- od_sub[od_sub[, .N] - 1, exposureTMP]
+          tie_idx <- which(od_sub$TIE_12A)[1]
+          at_minus1 <- od_sub[tie_idx - 1, exposureTMP]
           result_list[get(id_var) == tid & TIE_12A == TRUE,
                        exposureTMP := ifelse(tie_test, at_minus1,
                                              unique(z_max_freq_exp))]
@@ -389,7 +391,7 @@
                      (z_exp_time_by_freq_exp / z_exp_time) >= exp_threshold,
                      z_max_freq_exp, exposureTMP)]
       result_list[is.na(get(exp_level)) & is.na(exposureTMP) &
-                   case == "5b" & tie != 1,
+                   case == "5b" & tie != 1 & outcome != 1,
                    exposureTMP := z_max_freq_exp]
 
       result_list[, TIE_1B := case == "1b" & tie == 1]
@@ -420,7 +422,8 @@
                                                       fill = NA, type = "lead")]
           tie_test <- any(od_sub[TIE_3B == TRUE, exposureTMP] %in%
                           od_sub[!TIE_3B & TIE_3B_LEAD == TRUE, exposureTMP])
-          at_minus1 <- od_sub[od_sub[, .N] - 1, exposureTMP]
+          tie_idx <- which(od_sub$TIE_3B)[1]
+          at_minus1 <- od_sub[tie_idx - 1, exposureTMP]
           result_list[get(id_var) == tid & TIE_3B == TRUE,
                        exposureTMP := ifelse(tie_test, at_minus1,
                                              unique(max_freq_exp))]
@@ -437,7 +440,8 @@
           zt_sub <- z_exposure_times[get(id_var) == tid]
           tie_test <- any(zt_sub[, get(exp_level)] %in%
                           od_sub[!TIE_5B & TIE_5B_LEAD == TRUE, exposureTMP])
-          at_minus1 <- od_sub[od_sub[, .N] - 1, exposureTMP]
+          tie_idx <- which(od_sub$TIE_5B)[1]
+          at_minus1 <- od_sub[tie_idx - 1, exposureTMP]
           result_list[get(id_var) == tid & TIE_5B == TRUE,
                        exposureTMP := ifelse(tie_test, at_minus1,
                                              unique(z_max_freq_exp))]
