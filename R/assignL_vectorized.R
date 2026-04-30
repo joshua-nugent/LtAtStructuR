@@ -747,7 +747,7 @@
     return(list(val = NA, dt = as.Date(NA)))
   }
   in_range <- cov_dates >= int_start_d & cov_dates <= int_end_d
-  if (!any(in_range)) return(list(val = NA, dt = as.Date(NA)))
+  if (!any(in_range, na.rm = TRUE)) return(list(val = NA, dt = as.Date(NA)))
   idx <- which(in_range)
   best <- idx[which.max(cov_dates[idx])]
   list(val = cov_values[best], dt = cov_dates[best])
@@ -763,7 +763,7 @@
     return(data.table::data.table())
   }
   in_range <- cov_dates >= int_start_d & cov_dates <= int_end_d
-  if (!any(in_range)) return(data.table::data.table())
+  if (!any(in_range, na.rm = TRUE)) return(data.table::data.table())
   idx <- which(in_range)
   best <- idx[which.max(cov_dates[idx])]
   result <- data.table::data.table(V1 = cov_values[best], V2 = cov_dates[best])
