@@ -328,7 +328,10 @@
       result_list[tie == 1 & case %in% c("1a", "5a", "6a"),
                    exposureTMP := max_freq_exp]
       result_list[exposure == 1 & case == "12a" & tie != 1,
-                   exposureTMP := unique(z_exposure_times[, get(exp_level)]),
+                   exposureTMP := {
+                     sub <- z_exposure_times[get(id_var) == .BY[[1]]]
+                     unique(sub[, get(exp_level)])
+                   },
                    by = id_var]
 
       result_list[, TIE_8A := case == "8a" & tie == 1]

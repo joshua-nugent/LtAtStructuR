@@ -748,9 +748,8 @@
   }
   in_range <- cov_dates >= int_start_d & cov_dates <= int_end_d
   if (!any(in_range)) return(list(val = NA, dt = as.Date(NA)))
-  # tail(..., 1) = last (most recent, since dates are ordered)
   idx <- which(in_range)
-  best <- idx[length(idx)]
+  best <- idx[which.max(cov_dates[idx])]
   list(val = cov_values[best], dt = cov_dates[best])
 }
 
