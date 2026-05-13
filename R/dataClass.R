@@ -3,16 +3,16 @@ utils::globalVariables(c("private"))
 `%+%` <- function(a, b) paste0(a, b)
 
 readOnly <- function(privateFieldName) {
-  res <- function(value) {
+  err_name <- gsub(".", "", privateFieldName, fixed = TRUE)
+  fn <- function(value) {}
+  body(fn) <- bquote({
     if (missing(value)) {
-      private$privateFieldName
+      private[[.(privateFieldName)]]
     } else {
-      stop(gsub(".", "", privateFieldName, fixed = TRUE), " is read only",
-        call. = FALSE
-      )
+      stop(.(err_name), " is read only", call. = FALSE)
     }
-  }
-  return(pryr::unenclose(res))
+  })
+  fn
 }
 
 getmode <- function(v) {
@@ -34,7 +34,6 @@ getmode <- function(v) {
 #' @docType class
 #'
 #' @importFrom R6 R6Class
-#' @importFrom pryr unenclose
 #' @importFrom data.table is.data.table copy setkeyv
 #' @importFrom lubridate is.Date
 #' @importFrom assertthat assert_that is.string
@@ -349,7 +348,6 @@ cohortData <- R6::R6Class(
 #' @docType class
 #'
 #' @importFrom R6 R6Class
-#' @importFrom pryr unenclose
 #' @importFrom data.table is.data.table copy setkeyv shift
 #' @importFrom lubridate is.Date now
 #' @importFrom assertthat assert_that is.string noNA
@@ -542,7 +540,6 @@ expData <- R6::R6Class(
 #' @docType class
 #'
 #' @importFrom R6 R6Class
-#' @importFrom pryr unenclose
 #' @importFrom data.table is.data.table copy setkeyv shift
 #' @importFrom lubridate is.Date now
 #' @importFrom assertthat assert_that is.string are_equal noNA
@@ -676,7 +673,6 @@ instExpData <- R6::R6Class(
 #' @docType class
 #'
 #' @importFrom R6 R6Class
-#' @importFrom pryr unenclose
 #' @importFrom data.table is.data.table copy setkeyv shift
 #' @importFrom lubridate is.Date
 #' @importFrom assertthat assert_that is.string noNA is.flag
@@ -947,7 +943,6 @@ timeDepCovData <- R6::R6Class(
 #' @docType class
 #'
 #' @importFrom R6 R6Class
-#' @importFrom pryr unenclose
 #' @importFrom data.table is.data.table copy setkeyv shift rbindlist setcolorder setorderv data.table merge.data.table
 #' @importFrom lubridate is.Date %within% interval as_date int_start int_end ymd interval int_overlaps intersect
 #' @importFrom assertthat assert_that is.string noNA is.flag are_equal
